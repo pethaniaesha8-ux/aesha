@@ -1,0 +1,74 @@
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import JSONResponse
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import face_recognition
+from PIL import Image
+import io, json, numpy as np
+import os
+
+# Load DB URL from environment or default to sqlite
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./faces.db")
+
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
+
+class Person(Base):
+    __tablename__ = "persons"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    embedding_json = Column(String)  # store list as JSON string
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Face Recognition Prototype API")
+
+def read_imagefile(file) -> np.ndarray:
+    image = Image.open(io.BytesIO(file)).convert("RGB")
+    return np.array(image)
+
+def get_face_encoding(np_image):
+    encodings = face_recognition.face_encodings(np_image)
+    if not encodings:
+        return None
+    return encodings[0]  # first face
+
+@app.post("/register")
+async def register(name: str = Form(...), file: UploadFile = File(...)):
+    contents = await file.read()
+    np_image = read_imagefile(contents)
+    encoding = get_face_encoding(np_image)
+    if encoding is None:
+        raise HTTPException(status_code=400, detail="No face found in the image.")
+    db = SessionLocal()
+    p = Person(name=name, embedding_json=json.dumps(encoding.tolist()))
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    db.close()
+    return JSONResponse({"id": p.id, "name": p.name})
+
+@app.post("/recognize")
+async def recognize(file: UploadFile = File(...), threshold: float = 0.6):
+    contents = await file.read()
+    np_image = read_imagefile(contents)
+    encoding = get_face_encoding(np_image)
+    if encoding is None:
+        raise HTTPException(status_code=400, detail="No face found in the image.")
+    # load all embeddings and compute distance
+    db = SessionLocal()
+    persons = db.query(Person).all()
+    db.close()
+    best = None
+    best_dist = float("inf")
+    for p in persons:
+        stored = np.array(json.loads(p.embedding_json))
+        dist = np.linalg.norm(stored - encoding)
+        if dist < best_dist:
+            best_dist = dist
+            best = p
+    if best is None or best_dist > threshold:
+        return JSONResponse({"match": False, "distance": best_dist})
+    return JSONResponse({"match": True, "id": best.id, "name": best.name, "distance": float(best_dist)})
