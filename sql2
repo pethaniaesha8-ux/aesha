@@ -1,0 +1,4 @@
+SELECT id, name, embedding <-> '[0.12, -0.23, ...]' AS distance
+FROM persons
+ORDER BY embedding <-> '[0.12, -0.23, ...]'
+LIMIT 1;
